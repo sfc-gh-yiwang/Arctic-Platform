@@ -26,22 +26,30 @@ construction time.
 from __future__ import annotations
 
 import logging
+import os
 
 from arctic_platform.rl.config import ArcticRLClientConfig
-from arctic_platform.rl.http_client import ArcticRLHTTPClient
-from arctic_platform.rl.ray_client import ArcticRLRayClient
-
-# from arctic_platform.rl.ray_server import ArcticRLRayServerState
 from arctic_platform.rl.server import ArcticRLServerState
 
 logger = logging.getLogger(__name__)
 
 
 def create_arctic_rl_client(config: ArcticRLClientConfig, arctic_rl_server_state: ArcticRLServerState = None):
+    # ``ARCTIC_BACKEND=cortex`` routes SkyRL / verl adapters (which hard-code
+    # ``backend="local"``) to the Cortex shim without an adapter-side patch.
+    # HTTP / Ray backends are imported lazily so a CPU-only Cortex driver
+    # doesn't pay the ``arctic_inference.server`` import cost.
+    if os.environ.get("ARCTIC_BACKEND", "").lower() == "cortex":
+        from arctic_platform.rl._cortex_dispatch import create_cortex_client
+
+        return create_cortex_client(config)
+
     if config.comm_protocol == "http":
+        from arctic_platform.rl.http_client import ArcticRLHTTPClient
+
         return ArcticRLHTTPClient(config)
-    elif config.comm_protocol == "ray":
-        # assert arctic_rl_server_state is not None, "arctic_rl_server_state is required for comm_protocol: ray"
+    if config.comm_protocol == "ray":
+        from arctic_platform.rl.ray_client import ArcticRLRayClient
+
         return ArcticRLRayClient(config, arctic_rl_server_state)
-    else:
-        raise ValueError(f"Invalid communication protocol: {config.comm_protocol}")
+    raise ValueError(f"Invalid communication protocol: {config.comm_protocol}")
