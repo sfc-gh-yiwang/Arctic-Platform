@@ -222,14 +222,10 @@ class CortexTransport(Transport):
 
     # ── deliver one op: submit + poll to completion ──────────────────────────
     def call(self, request: Request) -> dict:
-        result = self._poll(self._submit(request))
-        # generate returns token ids as DSSST1 tensors; on-prem returns plain
-        # lists, so match that contract.
-        return _to_python(result) if request.op == "generate" else result
+        return _normalize_response(request.op, self._poll(self._submit(request)))
 
     async def acall(self, request: Request) -> dict:
-        result = await self._apoll(await self._asubmit(request))
-        return _to_python(result) if request.op == "generate" else result
+        return _normalize_response(request.op, await self._apoll(await self._asubmit(request)))
 
     def _submit(self, request: Request) -> str:
         # Same shape as on-prem's call: build the url, then pick the wire. Octet ops
@@ -520,3 +516,27 @@ def _to_python(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_to_python(v) for v in obj]
     return obj
+
+
+# Cortex returns training scalars flat (``avg_loss``, ``grad_norm``, ``last_lr``,
+# ``global_steps``, ``update_successful``, ``approx_kl``, ...). On-prem returns
+# them nested under ``metrics`` with ``avg_loss`` aliased to ``loss``. Lift here
+# so every ``arctic_platform.client`` caller sees the on-prem shape and stops
+# key-branching per backend. ``generate`` still passes through ``_to_python``.
+_LIFTED_TRAINING_METRICS = (
+    "avg_loss", "approx_kl", "importance_weight", "clip_ratio", "entropy",
+    "grad_norm", "last_lr", "global_steps", "update_successful",
+)
+
+
+def _normalize_response(op: str, result: dict) -> dict:
+    if op == "generate":
+        return _to_python(result)
+    if op in ("forward-backward", "step") and isinstance(result, dict):
+        m = result.setdefault("metrics", {})
+        if not isinstance(m, dict):
+            m = result["metrics"] = {}
+        for k in _LIFTED_TRAINING_METRICS:
+            if k in result:
+                m.setdefault("loss" if k == "avg_loss" else k, result[k])
+    return result
